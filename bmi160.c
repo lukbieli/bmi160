@@ -22,6 +22,7 @@
 #include <esp_idf_lib_helpers.h>
 #include <esp_err.h>
 #include <string.h>
+#include <math.h>
 
 #include "bmi160.h"
 
@@ -276,9 +277,8 @@ esp_err_t bmi160_calibrate(bmi160_t *dev)
         gyroX += result.gyroX;
         gyroY += result.gyroY;
         gyroZ += result.gyroZ;
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(20) + 1);
     }
-    I2C_DEV_GIVE_MUTEX(&dev->i2c_dev);
 
     //calculate average
     accX /= 64.0f;
@@ -296,6 +296,8 @@ esp_err_t bmi160_calibrate(bmi160_t *dev)
     dev->gBias[1] = gyroY;
     dev->gBias[2] = gyroZ;
 
+    I2C_DEV_GIVE_MUTEX(&dev->i2c_dev);
+
     //print bias values
     ESP_LOGD(TAG, "Accel Bias: %+.3f %+.3f %+.3f Gyro Bias: %+.3f %+.3f %+.3f", dev->aBias[0], dev->aBias[1], dev->aBias[2], dev->gBias[0], dev->gBias[1], dev->gBias[2]);
 
@@ -305,7 +307,7 @@ esp_err_t bmi160_calibrate(bmi160_t *dev)
 /**
  * @brief self test for the BMI160
  *
- * @note
+ * @note returns fail if either accelerometer or gyroscope fails the self test
  *
  * @param dev
  * @return esp_err_t
@@ -315,6 +317,7 @@ esp_err_t bmi160_self_test(bmi160_t *dev)
     CHECK_ARG(dev);
     I2C_DEV_TAKE_MUTEX(&dev->i2c_dev);
 
+    esp_err_t ret = ESP_OK;
     //read device id
     uint8_t device_id;
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_read_reg_internal(dev, BMI160_CHIP_ID, &device_id), "Chip ID read failed");
@@ -332,13 +335,13 @@ esp_err_t bmi160_self_test(bmi160_t *dev)
     /* 1. acceletrometer */
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_set_acc_range_internal(dev, BMI160_ACC_RANGE_8G), "bmi160_set_acc_range_internal failed");
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_ACC_CONF, 0x2C), "Set Acc Conf failed");  // Set Accel ODR to 1600hz, BWP mode to Oversample 2, acc_us = 0
-
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_switch_accMode(dev, BMI160_PMU_ACC_NORMAL), "Mode change failed");
     // test negative direction
-    ESP_LOGD(TAG, "Accel self test sign 0");
+    ESP_LOGD(TAG, "Accel self test sign -");
     uint8_t reg = (0x01 << 0) | (0x00 << 2) | (0x01 << 3); // acc_self_test_en = 1, acc_self_test_sign = 0, acc_self_test_amp = 1
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_SELF_TEST, reg), "Start self test failed");
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50) + 1);
 
     uint8_t acc_self_test_result;
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_read_reg_internal(dev, BMI160_STATUS, &acc_self_test_result), "Read status failed");
@@ -351,52 +354,65 @@ esp_err_t bmi160_self_test(bmi160_t *dev)
     float accY0 = (float)((int16_t)(rawData[3] << 8) | rawData[2]) * dev->aRes;
     float accZ0 = (float)((int16_t)(rawData[5] << 8) | rawData[4]) * dev->aRes;
 
-    ESP_LOGD(TAG, "Accel self test: %.3f %.3f %.3f", accX0, accY0, accZ0);
+    ESP_LOGD(TAG, "Accel self+ test: %.3f %.3f %.3f", accX0, accY0, accZ0);
 
     // test positive direction
-    ESP_LOGD(TAG, "Accel self test sign 1");
+    ESP_LOGD(TAG, "Accel self test sign +");
     reg = (0x01 << 0) | (0x01 << 2) | (0x01 << 3); // acc_self_test_en = 1, acc_self_test_sign = 1, acc_self_test_amp = 1
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_SELF_TEST, reg), "Start self test failed");
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50) + 1);
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_read_reg_internal(dev, BMI160_STATUS, &acc_self_test_result), "Read status failed");
 
     ESP_LOGD(TAG, "Accel self test result: %02x", acc_self_test_result);
-
 
     I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_read_reg_array_internal(dev, BMI160_ACC_X_L, rawData, 6), "Read ACC_X_L failed");
     float accX1 = (float)((int16_t)(rawData[1] << 8) | rawData[0]) * dev->aRes;
     float accY1 = (float)((int16_t)(rawData[3] << 8) | rawData[2]) * dev->aRes;
     float accZ1 = (float)((int16_t)(rawData[5] << 8) | rawData[4]) * dev->aRes;
 
-    ESP_LOGD(TAG, "Accel self test: %.3f %.3f %.3f", accX1, accY1, accZ1);
+    ESP_LOGD(TAG, "Accel self- test: %.3f %.3f %.3f", accX1, accY1, accZ1);
 
     ESP_LOGD(TAG, "Accel self test diff: %.3f %.3f %.3f", accX1 - accX0, accY1 - accY0, accZ1 - accZ0);
 
-
-    /* 2. gyroscope */
-
-    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_set_gyr_range_internal(dev, BMI160_GYR_RANGE_1000DPS), "Set gyr range failed");
-    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_GYR_CONF, 0x2C), "Write gyr config failed");  // Set Gyro ODR to 1600hz, BWP mode to Oversample 2, gyr_us = 0
-
-    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_SELF_TEST, (uint8_t)(0x1 << 4)), "Write self test failed"); // gyr_self_test_en = 1
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    uint8_t gyr_self_test_result;
-    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_read_reg_internal(dev, BMI160_STATUS, &gyr_self_test_result), "Read status failed");
-    ESP_LOGD(TAG, "Gyro self test result: %02x", gyr_self_test_result);
-    if (gyr_self_test_result & (0x1 << 1))
+    /* according to datasheet each axis must have more than 2.0 difference betweeen both self test direction results */
+    if ((fabs(accX1 - accX0) < 2.0f) || (fabs(accY1 - accY0) < 2.0f) || (fabs(accZ1 - accZ0) < 2.0f))
     {
-        ESP_LOGD(TAG, "Gyro self test failed");
+        ret = ESP_FAIL; // store fail but continue self test
+        ESP_LOGE(TAG, "Acceletometer failed self test.");
     }
     else
     {
-        ESP_LOGD(TAG, "Gyro self test passed");
+        ESP_LOGI(TAG, "Accelerometer passed self test");
+    }
+
+
+    /* 2. gyroscope */
+    //reset device
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_reset(dev), " Reset fail");
+
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_set_gyr_range_internal(dev, BMI160_GYR_RANGE_1000DPS), "Set gyr range failed");
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_GYR_CONF, 0x2C), "Write gyr config failed");  // Set Gyro ODR to 1600hz, BWP mode to Oversample 2, gyr_us = 0
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_switch_gyrMode(dev, BMI160_PMU_GYR_NORMAL), "Mode change failed");
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_write_reg_internal(dev, BMI160_SELF_TEST, (uint8_t)(0x1 << 4)), "Write self test failed"); // gyr_self_test_en = 1
+
+    vTaskDelay(pdMS_TO_TICKS(100) + 1);
+
+    uint8_t gyr_self_test_result;
+    I2C_DEV_CHECK_LOGE(&dev->i2c_dev, bmi160_read_reg_internal(dev, BMI160_STATUS, &gyr_self_test_result), "Read status failed");
+    ESP_LOGI(TAG, "Gyro self test result: %02x", gyr_self_test_result);
+    if (gyr_self_test_result & (uint8_t)(0x1 << 1))
+    {
+        ESP_LOGI(TAG, "Gyroscope passed self test");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Gyroscope failed self test");
+        ret = ESP_FAIL;
     }
     I2C_DEV_GIVE_MUTEX(&dev->i2c_dev);
 
-    return ESP_OK;
+    return ret;
 }
 
 esp_err_t bmi160_enable_int_new_data(bmi160_t *dev, const bmi160_int_out_conf_t* const intOutConf)
@@ -672,7 +688,7 @@ static esp_err_t bmi160_write_reg_internal(bmi160_t *dev, uint8_t reg, uint8_t v
      * The times are preliminary and may need to be adjusted based on testing. For now, we just add a delay
      * after each write operation to ensure timing requirements are met.
      */
-    vTaskDelay(pdMS_TO_TICKS(1)); //delay 1 ms after each write operation
+    vTaskDelay(pdMS_TO_TICKS(1) + 1); //delay 1 ms after each write operation
 
     return ESP_OK;
 }
@@ -697,7 +713,7 @@ static esp_err_t bmi160_write_reg_array_internal(bmi160_t *dev, uint8_t reg, con
      * The times are preliminary and may need to be adjusted based on testing. For now, we just add a delay
      * after each write operation to ensure timing requirements are met.
      */
-    vTaskDelay(pdMS_TO_TICKS(1)); //delay 1 ms after each write operation
+    vTaskDelay(pdMS_TO_TICKS(1) + 1); //delay 1 ms after each write operation
     return ESP_OK;
 }
 
@@ -1170,7 +1186,7 @@ static esp_err_t bmi160_switch_accMode(bmi160_t *dev, bmi160_pmu_acc_mode_t accM
     ESP_LOGD(TAG, "Setting accMode 0x%02x", accMode);
     CHECK_LOGE(bmi160_write_reg_internal(dev, BMI160_CMD, accMode), "Mode %d not set", accMode);
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100) + 1);
 
     CHECK_LOGE(bmi160_read_accMode(dev, &accModeNow), "Mode read failed");
     if (accModeNow != accMode)
@@ -1227,7 +1243,7 @@ static esp_err_t bmi160_switch_gyrMode(bmi160_t *dev, bmi160_pmu_gyr_mode_t gyrM
     ESP_LOGD(TAG, "Setting gyrMode 0x%02x", gyrMode);
     CHECK_LOGE(bmi160_write_reg_internal(dev, BMI160_CMD, gyrMode), "Cmd gyrMode failed");
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100) + 1);
 
     CHECK_LOGE(bmi160_read_gyrMode(dev, &gyrModeNow), "Mode read failed");
     if (gyrMode != gyrModeNow)
@@ -1294,7 +1310,7 @@ static esp_err_t bmi160_reset(bmi160_t *dev)
     dev->gyrMode = BMI160_PMU_GYR_SUSPEND;
 
     //delay 100ms
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100) + 1);
 
     return ESP_OK;
 }

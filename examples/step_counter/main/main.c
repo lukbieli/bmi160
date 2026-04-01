@@ -87,13 +87,13 @@ void bmi160_task(void *pvParameters)
     bmi160_conf_t bmi160_conf =
     {
         .accRange = BMI160_ACC_RANGE_2G,
-        .accOdr = BMI160_ACC_ODR_1_56HZ,
-        .accAvg = BMI160_ACC_LP_AVG_8,
+        .accOdr = BMI160_ACC_ODR_12_5HZ,
+        .accAvg = BMI160_ACC_LP_AVG_4,
         .accMode = BMI160_PMU_ACC_LOW_POWER,
         .gyrRange = BMI160_GYR_RANGE_125DPS,
         .gyrOdr = BMI160_GYR_ODR_100HZ,
         .gyrMode = BMI160_PMU_GYR_SUSPEND,
-        .accUs = 1u
+        .accUs = BMI160_ACC_US_ON
     };
 
     ESP_ERROR_CHECK(bmi160_start(&bmi160_dev, &bmi160_conf));
